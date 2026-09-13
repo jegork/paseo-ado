@@ -2,6 +2,14 @@
 
 Azure DevOps support for Paseo, built on the `az` CLI (`azure-devops` extension). No credentials are stored by the plugin; `az login` on the daemon machine is the only setup.
 
+## Install
+
+```sh
+paseo plugin add jegork/paseo-ado
+```
+
+Requires the `az` CLI with the `azure-devops` extension, logged in on the daemon machine (`az login`).
+
 ## What it adds
 
 - **ADO PR panel** (workspace tab, also in Explorer): the active pull request for the current branch, reviewer votes, pipeline runs on `refs/pull/<id>/merge`, and review comments. Offers a Create button when the branch has no PR.
