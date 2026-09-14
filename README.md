@@ -13,6 +13,7 @@ Requires the `az` CLI with the `azure-devops` extension, logged in on the daemon
 ## What it adds
 
 - **ADO PR panel** (workspace tab, also in Explorer): the active pull request for the current branch, reviewer votes, pipeline runs on `refs/pull/<id>/merge`, and review comments. Offers a Create button when the branch has no PR.
+- **Send to agent** from the panel: one review comment, all open comments at once, the pipeline status table, or a failed run's error issues plus the tail of each failed task's log (capped at about 12 KB). Goes to the workspace's agent, with a picker when there are several. Sending is one-directional; the plugin never writes to Azure DevOps threads.
 - **Attachment sources** in the composer: *Azure DevOps work item* and *Azure DevOps pull request*. Search by id or title fragment; the attached text is a snapshot of the item.
 - **Slash commands** (workspace context):
   - `/adopr [title]` pushes the branch if needed and opens a PR with the given title or the last commit subject. The description is left empty on purpose.

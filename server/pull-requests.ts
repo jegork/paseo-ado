@@ -39,6 +39,10 @@ interface AzThread {
   }[];
 }
 
+export function buildUrl(apiUrl: string, project: string, buildId: number): string {
+  return `${orgFromApiUrl(apiUrl)}/${encodeURIComponent(project)}/_build/results?buildId=${buildId}`;
+}
+
 export function webUrl(pr: AzPullRequest): string {
   const org = orgFromApiUrl(pr.url);
   const project = encodeURIComponent(pr.repository.project.name);
@@ -78,11 +82,13 @@ async function listRuns(cwd: string, id: number): Promise<PipelineRun[]> {
     cwd,
   );
   return runs.map((run) => ({
+    id: run.id,
+    project: run.project.name,
     pipeline: run.definition.name,
     status: run.status,
     result: run.result ?? null,
     finished: run.finishTime ?? null,
-    url: `${orgFromApiUrl(run.url)}/${encodeURIComponent(run.project.name)}/_build/results?buildId=${run.id}`,
+    url: buildUrl(run.url, run.project.name, run.id),
   }));
 }
 

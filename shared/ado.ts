@@ -25,6 +25,8 @@ export const pullRequestSummary = z.object({
 });
 
 export const pipelineRun = z.object({
+  id: z.number(),
+  project: z.string(),
   pipeline: z.string(),
   status: z.string(),
   result: z.string().nullable(),
@@ -48,6 +50,16 @@ export const prOverview = defineRpc({
     pr: pullRequestSummary.nullable(),
     runs: z.array(pipelineRun),
     comments: z.array(reviewComment),
+  }),
+});
+
+export const runFailure = defineRpc({
+  name: "ado.run.failure",
+  input: z.object({ cwd: z.string(), runId: z.number(), project: z.string() }),
+  output: z.object({
+    pipeline: z.string(),
+    url: z.url(),
+    tasks: z.array(z.object({ name: z.string(), issues: z.array(z.string()), logTail: z.string() })),
   }),
 });
 

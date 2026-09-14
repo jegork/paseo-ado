@@ -1,11 +1,18 @@
 import type { PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
-import { useRpc, useWorkspace } from "@getpaseo/plugin/client";
-import { Icon, useToast } from "@getpaseo/plugin/client/react-native";
+import { usePaseo, useRpc, useWorkspace } from "@getpaseo/plugin/client";
+import { FlatList, Icon, Modal, useToast } from "@getpaseo/plugin/client/react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
-import { prCreate, prOverview, type PipelineRun, type ReviewComment } from "../shared/ado";
+import { prCreate, prOverview, runFailure, type PipelineRun, type ReviewComment } from "../shared/ado";
+import { allCommentsMessage, commentMessage, failureMessage, statusMessage } from "./messages";
 import { openExternal } from "./web";
+
+interface AgentChoice {
+  id: string;
+  title: string;
+  status: string;
+}
 
 function runColor(run: PipelineRun, colors: PluginWorkspacePanelProps["theme"]["colors"]): string {
   if (run.result === "succeeded") return colors.statusSuccess;
@@ -31,8 +38,13 @@ export function PullRequestPanel({ theme, layout, workspaceId }: PluginWorkspace
   const cwd = useWorkspace(workspaceId, (workspace) => workspace.directory);
   const fetchOverview = useRpc(prOverview);
   const createPr = useRpc(prCreate);
+  const fetchFailure = useRpc(runFailure);
+  const paseo = usePaseo();
   const toast = useToast();
   const queryClient = useQueryClient();
+  // a message waiting for an agent choice; resolved once the workspace has exactly one agent or the user picks
+  const [pending, setPending] = useState<{ label: string; text: string } | null>(null);
+  const [rememberedAgent, setRememberedAgent] = useState<string | null>(null);
   const queryKey = ["ado", "overview", cwd];
   const overview = useQuery({
     queryKey,
@@ -46,6 +58,55 @@ export function PullRequestPanel({ theme, layout, workspaceId }: PluginWorkspace
       toast.show(`Created PR !${pr.id}`, { variant: "success" });
       void queryClient.invalidateQueries({ queryKey });
     },
+    onError: (error) => toast.error(error instanceof Error ? error.message : String(error)),
+  });
+
+  const agents = useQuery({
+    queryKey: ["ado", "agents", workspaceId],
+    queryFn: async (): Promise<AgentChoice[]> => {
+      const result = await paseo.agents.list();
+      return result.entries
+        .map((entry) => entry.agent)
+        .filter((agent) => agent.workspaceId === workspaceId && !agent.archivedAt)
+        .map((agent) => ({ id: agent.id, title: agent.title ?? agent.provider, status: agent.status }));
+    },
+    enabled: pending !== null,
+  });
+  const send = useMutation({
+    mutationFn: async ({ agentId, text }: { agentId: string; text: string }) => {
+      await paseo.agents.ref(agentId).send(text);
+    },
+    onSuccess: () => {
+      setPending(null);
+      toast.show("Sent to agent", { variant: "success" });
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : String(error)),
+  });
+
+  function deliver(label: string, text: string) {
+    if (rememberedAgent) {
+      send.mutate({ agentId: rememberedAgent, text });
+      return;
+    }
+    setPending({ label, text });
+  }
+
+  // with a single agent in the workspace there is nothing to choose
+  const single = agents.data?.length === 1 ? agents.data[0] : null;
+  useEffect(() => {
+    if (!pending || !single || rememberedAgent || send.isPending) return;
+    setRememberedAgent(single.id);
+    send.mutate({ agentId: single.id, text: pending.text });
+  }, [pending, single, rememberedAgent, send]);
+
+  const data = overview.data;
+  const sendFailure = useMutation({
+    mutationFn: async (run: PipelineRun) => {
+      if (!data?.pr) throw new Error("No pull request");
+      const failure = await fetchFailure({ cwd: cwd!, runId: run.id, project: run.project });
+      return failureMessage(data.pr.id, failure);
+    },
+    onSuccess: (text) => deliver("pipeline failure", text),
     onError: (error) => toast.error(error instanceof Error ? error.message : String(error)),
   });
 
@@ -65,10 +126,11 @@ export function PullRequestPanel({ theme, layout, workspaceId }: PluginWorkspace
       ghost: { paddingVertical: 8, paddingHorizontal: 12, borderRadius: 8, borderWidth: 1, borderColor: theme.colors.border, alignSelf: "flex-start" as const },
       ghostText: { color: theme.colors.foreground, fontSize: 13 },
       danger: { color: theme.colors.statusDanger, fontSize: 13 },
+      agentRow: { paddingVertical: 12, paddingHorizontal: 16, borderBottomWidth: 1, borderBottomColor: theme.colors.border, gap: 2 },
     };
   }, [theme, layout.compact]);
 
-  const data = overview.data;
+  const openComments = data?.comments.filter((comment) => !comment.resolved) ?? [];
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
@@ -132,30 +194,65 @@ export function PullRequestPanel({ theme, layout, workspaceId }: PluginWorkspace
             </Pressable>
           </View>
 
-          <Text style={styles.section}>Pipelines</Text>
+          <View style={styles.row}>
+            <Text style={styles.section}>Pipelines</Text>
+            <View style={{ flex: 1 }} />
+            {data.runs.length > 0 ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Send pipeline status to agent"
+                style={styles.ghost}
+                onPress={() => deliver("pipeline status", statusMessage(data.pr!.id, data.runs))}
+              >
+                <Text style={styles.ghostText}>Send status</Text>
+              </Pressable>
+            ) : null}
+          </View>
           {data.runs.length === 0 ? <Text style={styles.muted}>No pipeline runs for this PR.</Text> : null}
-          {data.runs.map((run, index) => (
-            <Pressable
-              key={`${run.pipeline}-${index}`}
-              accessibilityRole={run.url ? "link" : "text"}
-              disabled={!run.url}
-              onPress={() => run.url && void openExternal(run.url)}
-              style={styles.card}
-            >
+          {data.runs.map((run) => (
+            <View key={run.id} style={styles.card}>
               <View style={styles.row}>
                 <Icon name="Workflow" size={14} color={runColor(run, theme.colors)} />
-                <Text style={styles.body} numberOfLines={1}>
+                <Text style={{ ...styles.body, flexShrink: 1 }} numberOfLines={1}>
                   {run.pipeline}
                 </Text>
+                <View style={{ flex: 1 }} />
+                <Pressable accessibilityRole="link" accessibilityLabel="Open run" onPress={() => run.url && void openExternal(run.url)}>
+                  <Icon name="ExternalLink" size={14} color={theme.colors.foregroundMuted} />
+                </Pressable>
               </View>
               <Text style={{ ...styles.muted, color: runColor(run, theme.colors) }}>
                 {run.result ?? run.status}
                 {run.finished ? ` · ${formatDate(run.finished)}` : ""}
               </Text>
-            </Pressable>
+              {run.result === "failed" || run.result === "partiallySucceeded" ? (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Send failure log to agent"
+                  style={styles.button}
+                  disabled={sendFailure.isPending}
+                  onPress={() => sendFailure.mutate(run)}
+                >
+                  <Text style={styles.buttonText}>{sendFailure.isPending ? "Fetching log…" : "Send failure to agent"}</Text>
+                </Pressable>
+              ) : null}
+            </View>
           ))}
 
-          <Text style={styles.section}>Review comments</Text>
+          <View style={styles.row}>
+            <Text style={styles.section}>Review comments</Text>
+            <View style={{ flex: 1 }} />
+            {openComments.length > 0 ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Send all open comments to agent"
+                style={styles.button}
+                onPress={() => deliver("open comments", allCommentsMessage(data.pr!.id, openComments))}
+              >
+                <Text style={styles.buttonText}>Send all open ({openComments.length})</Text>
+              </Pressable>
+            ) : null}
+          </View>
           {data.comments.length === 0 ? <Text style={styles.muted}>No review comments.</Text> : null}
           {data.comments.map((comment: ReviewComment, index) => (
             <View key={index} style={styles.card}>
@@ -166,10 +263,54 @@ export function PullRequestPanel({ theme, layout, workspaceId }: PluginWorkspace
               <Text selectable style={styles.body}>
                 {comment.content}
               </Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Send this comment to agent"
+                style={styles.ghost}
+                onPress={() => deliver("review comment", commentMessage(data.pr!.id, comment))}
+              >
+                <Text style={styles.ghostText}>Send to agent</Text>
+              </Pressable>
             </View>
           ))}
         </>
       ) : null}
+
+      <Modal
+        title={pending ? `Send ${pending.label} to…` : "Send to agent"}
+        icon={<Icon name="Send" size={18} color={theme.colors.foreground} />}
+        open={pending !== null && !single}
+        onOpenChange={(open) => !open && setPending(null)}
+      >
+        <Modal.Content scrollable={false} contentContainerStyle={{ padding: 0, gap: 0 }}>
+          {agents.isLoading ? <Text style={{ ...styles.muted, padding: 16 }}>Loading agents…</Text> : null}
+          {agents.data && agents.data.length === 0 ? (
+            <Text style={{ ...styles.muted, padding: 16 }}>No agents in this workspace. Start one first.</Text>
+          ) : null}
+          <FlatList
+            style={{ flex: 1, minHeight: 0 }}
+            data={agents.data ?? []}
+            keyExtractor={(item) => item.id}
+            renderItem={({ item }) => (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Send to ${item.title}`}
+                disabled={send.isPending}
+                style={styles.agentRow}
+                onPress={() => {
+                  setRememberedAgent(item.id);
+                  if (pending) send.mutate({ agentId: item.id, text: pending.text });
+                }}
+              >
+                <Text style={styles.body} numberOfLines={1}>
+                  {item.title}
+                </Text>
+                <Text style={styles.muted}>{item.status}</Text>
+              </Pressable>
+            )}
+          />
+        </Modal.Content>
+      </Modal>
     </ScrollView>
   );
 }
