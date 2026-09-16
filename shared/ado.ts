@@ -63,6 +63,36 @@ export const runFailure = defineRpc({
   }),
 });
 
+export const mergeStrategy = z.enum(["noFastForward", "squash", "rebase", "rebaseMerge"]);
+
+export const prMergeState = defineRpc({
+  name: "ado.pr.merge-state",
+  input: z.object({ cwd: z.string(), id: z.number() }),
+  output: z.object({
+    mergeStatus: z.string(),
+    isDraft: z.boolean(),
+    autoCompleteBy: z.string().nullable(),
+    strategy: mergeStrategy.nullable(),
+    deleteSourceBranch: z.boolean(),
+    allowedStrategies: z.array(mergeStrategy),
+    policies: z.array(z.object({ type: z.string(), status: z.string(), blocking: z.boolean() })),
+    canCompleteNow: z.boolean(),
+  }),
+});
+
+export const prComplete = defineRpc({
+  name: "ado.pr.complete",
+  input: z.object({
+    cwd: z.string(),
+    id: z.number(),
+    action: z.enum(["auto-complete", "complete", "cancel-auto-complete"]),
+    strategy: mergeStrategy.optional(),
+    deleteSourceBranch: z.boolean().optional(),
+    transitionWorkItems: z.boolean().optional(),
+  }),
+  output: z.object({ status: z.string(), autoCompleteBy: z.string().nullable() }),
+});
+
 export const prList = defineRpc({
   name: "ado.pr.list",
   input: z.object({ cwd: z.string() }),
@@ -108,3 +138,12 @@ export const pullRequestSource = defineAttachmentSource({
 export type PullRequestSummary = z.infer<typeof pullRequestSummary>;
 export type PipelineRun = z.infer<typeof pipelineRun>;
 export type ReviewComment = z.infer<typeof reviewComment>;
+export type MergeStrategy = z.infer<typeof mergeStrategy>;
+export type MergeState = z.infer<(typeof prMergeState)["output"]>;
+
+export const STRATEGY_LABEL: Record<MergeStrategy, string> = {
+  noFastForward: "Merge commit",
+  squash: "Squash",
+  rebase: "Rebase, fast-forward",
+  rebaseMerge: "Rebase, merge commit",
+};

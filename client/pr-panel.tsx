@@ -4,7 +4,7 @@ import { FlatList, Icon, Modal, useToast } from "@getpaseo/plugin/client/react-n
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
-import { prCreate, prOverview, runFailure, type PipelineRun, type ReviewComment } from "../shared/ado";
+import { prComplete, prCreate, prMergeState, prOverview, runFailure, STRATEGY_LABEL, type MergeStrategy, type PipelineRun, type ReviewComment } from "../shared/ado";
 import { allCommentsMessage, commentMessage, failureMessage, statusMessage } from "./messages";
 import { openExternal } from "./web";
 
@@ -39,6 +39,12 @@ export function PullRequestPanel({ theme, layout, workspaceId }: PluginWorkspace
   const fetchOverview = useRpc(prOverview);
   const createPr = useRpc(prCreate);
   const fetchFailure = useRpc(runFailure);
+  const fetchMergeState = useRpc(prMergeState);
+  const completePr = useRpc(prComplete);
+  const [merging, setMerging] = useState(false);
+  const [strategy, setStrategy] = useState<MergeStrategy | null>(null);
+  const [deleteSource, setDeleteSource] = useState<boolean | null>(null);
+  const [transitionItems, setTransitionItems] = useState(false);
   const paseo = usePaseo();
   const toast = useToast();
   const queryClient = useQueryClient();
@@ -100,6 +106,32 @@ export function PullRequestPanel({ theme, layout, workspaceId }: PluginWorkspace
   }, [pending, single, rememberedAgent, send]);
 
   const data = overview.data;
+  const merge = useQuery({
+    queryKey: ["ado", "merge", cwd, data?.pr?.id],
+    queryFn: () => fetchMergeState({ cwd: cwd!, id: data!.pr!.id }),
+    enabled: !!cwd && !!data?.pr,
+    refetchInterval: 60_000,
+  });
+  const completion = useMutation({
+    mutationFn: (action: "auto-complete" | "complete" | "cancel-auto-complete") =>
+      completePr({
+        cwd: cwd!,
+        id: data!.pr!.id,
+        action,
+        strategy: strategy ?? undefined,
+        deleteSourceBranch: deleteSource ?? undefined,
+        transitionWorkItems: transitionItems,
+      }),
+    onSuccess: (result, action) => {
+      setMerging(false);
+      toast.show(
+        action === "complete" ? "Pull request completed" : action === "auto-complete" ? `Auto-complete set by ${result.autoCompleteBy ?? "you"}` : "Auto-complete cancelled",
+        { variant: "success" },
+      );
+      void queryClient.invalidateQueries({ queryKey: ["ado"] });
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : String(error)),
+  });
   const sendFailure = useMutation({
     mutationFn: async (run: PipelineRun) => {
       if (!data?.pr) throw new Error("No pull request");
@@ -184,14 +216,37 @@ export function PullRequestPanel({ theme, layout, workspaceId }: PluginWorkspace
                 {data.pr.reviewers.map((r) => `${r.name}: ${voteLabel(r.vote)}`).join(" · ")}
               </Text>
             ) : null}
-            <Pressable
-              accessibilityRole="link"
-              accessibilityLabel="Open in Azure DevOps"
-              style={styles.ghost}
-              onPress={() => void openExternal(data.pr!.url)}
-            >
-              <Text style={styles.ghostText}>Open in Azure DevOps</Text>
-            </Pressable>
+            <View style={styles.row}>
+              <Pressable
+                accessibilityRole="link"
+                accessibilityLabel="Open in Azure DevOps"
+                style={styles.ghost}
+                onPress={() => void openExternal(data.pr!.url)}
+              >
+                <Text style={styles.ghostText}>Open in Azure DevOps</Text>
+              </Pressable>
+              {data.pr.status === "active" ? (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Merge options"
+                  style={styles.button}
+                  onPress={() => {
+                    setStrategy(merge.data?.strategy ?? merge.data?.allowedStrategies[0] ?? null);
+                    setDeleteSource(merge.data?.deleteSourceBranch ?? true);
+                    setMerging(true);
+                  }}
+                >
+                  <Text style={styles.buttonText}>{merge.data?.autoCompleteBy ? "Auto-complete set" : "Merge…"}</Text>
+                </Pressable>
+              ) : null}
+            </View>
+            {merge.data ? (
+              <Text style={styles.muted}>
+                merge {merge.data.mergeStatus}
+                {merge.data.autoCompleteBy ? ` · auto-complete by ${merge.data.autoCompleteBy}` : ""}
+                {merge.data.policies.length ? ` · ${merge.data.policies.map((p) => `${p.type}: ${p.status}`).join(", ")}` : ""}
+              </Text>
+            ) : null}
           </View>
 
           <View style={styles.row}>
@@ -275,6 +330,79 @@ export function PullRequestPanel({ theme, layout, workspaceId }: PluginWorkspace
           ))}
         </>
       ) : null}
+
+      <Modal
+        title={data?.pr ? `Merge !${data.pr.id}` : "Merge"}
+        icon={<Icon name="GitMerge" size={18} color={theme.colors.foreground} />}
+        open={merging}
+        onOpenChange={(open) => !open && setMerging(false)}
+      >
+        <Modal.Content>
+          {merge.data ? (
+            <>
+              <Text style={styles.muted}>
+                {data?.pr?.sourceBranch} → {data?.pr?.targetBranch} · merge {merge.data.mergeStatus}{merge.data.isDraft ? " · draft" : ""}
+              </Text>
+              {merge.data.policies.map((p) => (
+                <Text key={p.type} style={{ ...styles.muted, color: p.status === "approved" ? theme.colors.statusSuccess : p.blocking ? theme.colors.statusWarning : theme.colors.foregroundMuted }}>
+                  {p.blocking ? "required" : "optional"} · {p.type}: {p.status}
+                </Text>
+              ))}
+              <Text style={styles.section}>Strategy</Text>
+              <View style={styles.row}>
+                {merge.data.allowedStrategies.map((s) => (
+                  <Pressable
+                    key={s}
+                    accessibilityRole="button"
+                    accessibilityLabel={STRATEGY_LABEL[s]}
+                    style={strategy === s ? styles.button : styles.ghost}
+                    onPress={() => setStrategy(s)}
+                  >
+                    <Text style={strategy === s ? styles.buttonText : styles.ghostText}>{STRATEGY_LABEL[s]}</Text>
+                  </Pressable>
+                ))}
+              </View>
+              <View style={styles.row}>
+                <Pressable accessibilityRole="switch" accessibilityLabel="Delete source branch after merge" style={styles.row} onPress={() => setDeleteSource(!deleteSource)}>
+                  <Icon name={deleteSource ? "SquareCheck" : "Square"} size={18} color={theme.colors.foreground} />
+                  <Text style={styles.body}>Delete source branch</Text>
+                </Pressable>
+              </View>
+              <View style={styles.row}>
+                <Pressable accessibilityRole="switch" accessibilityLabel="Transition linked work items" style={styles.row} onPress={() => setTransitionItems(!transitionItems)}>
+                  <Icon name={transitionItems ? "SquareCheck" : "Square"} size={18} color={theme.colors.foreground} />
+                  <Text style={styles.body}>Transition linked work items</Text>
+                </Pressable>
+              </View>
+              <View style={styles.row}>
+                {merge.data.autoCompleteBy ? (
+                  <Pressable accessibilityRole="button" accessibilityLabel="Cancel auto-complete" style={styles.ghost} disabled={completion.isPending} onPress={() => completion.mutate("cancel-auto-complete")}>
+                    <Text style={styles.ghostText}>Cancel auto-complete</Text>
+                  </Pressable>
+                ) : (
+                  <Pressable accessibilityRole="button" accessibilityLabel="Complete automatically when policies pass" style={styles.ghost} disabled={completion.isPending} onPress={() => completion.mutate("auto-complete")}>
+                    <Text style={styles.ghostText}>Auto-complete when policies pass</Text>
+                  </Pressable>
+                )}
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Complete the pull request now"
+                  style={{ ...styles.button, opacity: merge.data.canCompleteNow ? 1 : 0.5 }}
+                  disabled={!merge.data.canCompleteNow || completion.isPending}
+                  onPress={() => completion.mutate("complete")}
+                >
+                  <Text style={styles.buttonText}>{completion.isPending ? "Working…" : "Complete now"}</Text>
+                </Pressable>
+              </View>
+              {!merge.data.canCompleteNow ? (
+                <Text style={styles.muted}>Complete now is available once the merge succeeds and every required policy is approved.</Text>
+              ) : null}
+            </>
+          ) : (
+            <Text style={styles.muted}>Loading merge state…</Text>
+          )}
+        </Modal.Content>
+      </Modal>
 
       <Modal
         title={pending ? `Send ${pending.label} to…` : "Send to agent"}
