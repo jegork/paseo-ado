@@ -34,7 +34,10 @@ export function stripHtml(html: string | null | undefined): string {
   if (!html) return "";
   return html
     .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/(p|div|li|h[1-6])>/gi, "\n")
+    .replace(/<\/(p|div|li|h[1-6]|tr)>/gi, "\n")
+    .replace(/<li[^>]*>/gi, "- ")
+    // a short bold run at the start of a line is a heading; keep it on its own line
+    .replace(/(^|\n)\s*<(b|strong)>([^<]{1,60})<\/\2>\s*/gi, "$1$3\n")
     .replace(/<[^>]+>/g, "")
     .replace(/&nbsp;/g, " ")
     .replace(/&amp;/g, "&")

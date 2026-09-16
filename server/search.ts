@@ -11,14 +11,27 @@ interface AzWorkItem {
     "System.WorkItemType"?: string;
     "System.State"?: string;
     "System.TeamProject"?: string;
+    "System.Parent"?: number;
+    "System.CommentCount"?: number;
     "System.Description"?: string;
     "System.AssignedTo"?: { displayName: string } | string;
     "Microsoft.VSTS.Common.AcceptanceCriteria"?: string;
+    "Microsoft.VSTS.TCM.ReproSteps"?: string;
+    "Microsoft.VSTS.TCM.SystemInfo"?: string;
   };
 }
 
+interface AzComment {
+  createdBy: { displayName: string };
+  createdDate: string;
+  text: string;
+}
+
 const WORK_ITEM_FIELDS =
-  "[System.Id], [System.Title], [System.WorkItemType], [System.State], [System.TeamProject], [System.AssignedTo]";
+  "[System.Id], [System.Title], [System.WorkItemType], [System.State], [System.TeamProject], [System.AssignedTo], [System.Parent], [System.CommentCount]";
+
+// search results come back without bodies, and each body is one az call, so keep the batch small
+const DETAIL_LIMIT = 6;
 
 function wiqlLiteral(value: string): string {
   return value.replace(/'/g, "''");
@@ -35,6 +48,58 @@ function workItemUrl(item: AzWorkItem): string {
   return `${orgFromApiUrl(item.url)}/${project}/_workitems/edit/${item.id}`;
 }
 
+function showWorkItem(id: number): Promise<AzWorkItem> {
+  return az<AzWorkItem>(["boards", "work-item", "show", "--id", String(id)]);
+}
+
+async function listComments(item: AzWorkItem): Promise<AzComment[]> {
+  if (!item.fields["System.CommentCount"]) return [];
+  const project = item.fields["System.TeamProject"];
+  if (!project) return [];
+  const result = await az<{ comments: AzComment[] }>([
+    "devops", "invoke", "--area", "wit", "--resource", "comments",
+    "--route-parameters", `project=${project}`, `workItemId=${item.id}`,
+    "--api-version", "7.1-preview",
+  ]).catch(() => ({ comments: [] as AzComment[] }));
+  return result.comments ?? [];
+}
+
+function bodySections(item: AzWorkItem): string[] {
+  const sections: string[] = [];
+  const description = stripHtml(item.fields["System.Description"]);
+  const repro = stripHtml(item.fields["Microsoft.VSTS.TCM.ReproSteps"]);
+  const systemInfo = stripHtml(item.fields["Microsoft.VSTS.TCM.SystemInfo"]);
+  const acceptance = stripHtml(item.fields["Microsoft.VSTS.Common.AcceptanceCriteria"]);
+  if (description) sections.push(`\n${description}`);
+  if (repro) sections.push(`\nRepro steps:\n${repro}`);
+  if (systemInfo) sections.push(`\nSystem info:\n${systemInfo}`);
+  if (acceptance) sections.push(`\nAcceptance criteria:\n${acceptance}`);
+  return sections;
+}
+
+function snapshot(item: AzWorkItem, parent: AzWorkItem | null, comments: AzComment[]): string {
+  const title = item.fields["System.Title"] ?? `Work item ${item.id}`;
+  const type = item.fields["System.WorkItemType"] ?? "Work item";
+  const lines = [
+    `${type} #${item.id}: ${title}`,
+    `State: ${item.fields["System.State"] ?? "unknown"}`,
+    `Assigned to: ${assignee(item)}`,
+    `URL: ${workItemUrl(item)}`,
+    ...bodySections(item),
+  ];
+  if (parent) {
+    const parentType = parent.fields["System.WorkItemType"] ?? "Parent";
+    lines.push(`\nParent ${parentType} #${parent.id}: ${parent.fields["System.Title"] ?? ""}`, `Parent URL: ${workItemUrl(parent)}`, ...bodySections(parent));
+  }
+  if (comments.length) {
+    lines.push("\nDiscussion:");
+    for (const comment of comments) {
+      lines.push(`- ${comment.createdBy.displayName} (${comment.createdDate.slice(0, 16).replace("T", " ")}): ${stripHtml(comment.text)}`);
+    }
+  }
+  return lines.join("\n");
+}
+
 export async function workItems({ query }: RpcInput<typeof searchWorkItems>): Promise<RpcOutput<typeof searchWorkItems>> {
   const trimmed = query.trim();
   const where = /^\d+$/.test(trimmed)
@@ -46,36 +111,30 @@ export async function workItems({ query }: RpcInput<typeof searchWorkItems>): Pr
     "boards", "query", "--wiql",
     `SELECT ${WORK_ITEM_FIELDS} FROM WorkItems WHERE ${where} ORDER BY [System.ChangedDate] DESC`,
   ]);
-  // wiql only returns the selected scalar fields, and description needs one call per item, so keep the batch small
-  const top = found.slice(0, 8);
-  const detailed = await Promise.all(
-    top.map((item) => az<AzWorkItem>(["boards", "work-item", "show", "--id", String(item.id)]).catch(() => item)),
-  );
+  const top = found.slice(0, DETAIL_LIMIT);
+  const detailed = await Promise.all(top.map((item) => showWorkItem(item.id).catch(() => item)));
+  // tasks usually carry no body of their own; the parent backlog item is where the intent lives
+  const parentIds = new Set(detailed.map((item) => item.fields["System.Parent"]).filter((id): id is number => typeof id === "number"));
+  const parents = new Map<number, AzWorkItem>();
+  await Promise.all([...parentIds].map(async (id) => {
+    const parent = await showWorkItem(id).catch(() => null);
+    if (parent) parents.set(id, parent);
+  }));
+  const comments = await Promise.all(detailed.map((item) => listComments(item)));
   return {
-    items: detailed.map((item) => {
+    items: detailed.map((item, index) => {
       const title = item.fields["System.Title"] ?? `Work item ${item.id}`;
       const type = item.fields["System.WorkItemType"] ?? "Work item";
       const state = item.fields["System.State"] ?? "";
-      const url = workItemUrl(item);
-      const description = stripHtml(item.fields["System.Description"]);
-      const acceptance = stripHtml(item.fields["Microsoft.VSTS.Common.AcceptanceCriteria"]);
-      const text = [
-        `${type} #${item.id}: ${title}`,
-        `State: ${state}`,
-        `Assigned to: ${assignee(item)}`,
-        `URL: ${url}`,
-        description ? `\n${description}` : "",
-        acceptance ? `\nAcceptance criteria:\n${acceptance}` : "",
-      ]
-        .filter(Boolean)
-        .join("\n");
+      const parentId = item.fields["System.Parent"];
+      const parent = typeof parentId === "number" ? parents.get(parentId) ?? null : null;
       return {
         id: String(item.id),
         identifier: `#${item.id}`,
         title,
-        subtitle: [type, state].filter(Boolean).join(" · "),
-        url,
-        text,
+        subtitle: [type, state, parent ? `↑ #${parent.id}` : ""].filter(Boolean).join(" · "),
+        url: workItemUrl(item),
+        text: snapshot(item, parent, comments[index] ?? []),
         resourceType: "work-item",
       };
     }),
