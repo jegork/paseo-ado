@@ -34,16 +34,19 @@ export function stripHtml(html: string | null | undefined): string {
   if (!html) return "";
   return html
     .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/(p|div|li|h[1-6]|tr)>/gi, "\n")
+    // block openers break lines too: ado wraps every paragraph in a div, headings included
+    .replace(/<\/?(p|div|h[1-6]|tr|ul|ol)[^>]*>/gi, "\n")
+    .replace(/<\/li>/gi, "\n")
     .replace(/<li[^>]*>/gi, "- ")
-    // a short bold run at the start of a line is a heading; keep it on its own line
-    .replace(/(^|\n)\s*<(b|strong)>([^<]{1,60})<\/\2>\s*/gi, "$1$3\n")
     .replace(/<[^>]+>/g, "")
     .replace(/&nbsp;/g, " ")
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
+    .split("\n")
+    .map((line) => line.replace(/\s+$/, ""))
+    .join("\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
