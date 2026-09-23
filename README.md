@@ -1,5 +1,7 @@
 # paseo-ado
 
+> **Archived.** This plugin now lives in [jegork/paseo-plugins](https://github.com/jegork/paseo-plugins/tree/main/paseo-ado).
+
 Azure DevOps support for Paseo, built on the `az` CLI (`azure-devops` extension). No credentials are stored by the plugin; `az login` on the daemon machine is the only setup.
 
 ## Install
